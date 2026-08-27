@@ -44,6 +44,7 @@ MODEL_DIR=""
 for path in \
     "${REPO_ROOT}/model/audio8_tts_0_6B_preview" \
     "${REPO_ROOT}/model/Audio8-TTS-Preview-0.6b" \
+    "${REPO_ROOT}/onnx_runtime/model" \
     "${REPO_ROOT}/model"; do
     if [ -d "$path" ]; then
         MODEL_DIR="$path"
