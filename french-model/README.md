@@ -2,31 +2,55 @@
 
 Fine-tune Audio8 TTS on a custom French Creole (Kreyòl) dataset.
 
-## Setup
+## Project Structure
+
+```
+~/audio8/
+├── Audio8_TTS/              # Original model repo (code + model weights)
+├── audio8-creole/           # This repo (training scripts)
+│   └── french-model/
+│       ├── train.sh         # Setup + training script
+│       ├── verify.sh        # Quick verification
+│       └── README.md
+└── kreol/                   # Dataset
+    └── data/
+        └── worldspeech_mfe_ljspeech/
+            └── wavs/        # .wav files
+```
+
+## Quick Start
 
 ```bash
-# Update DATASET_PATH in train.sh, then:
+cd ~/audio8/audio8-creole/french-model
+
+# 1. Verify setup
+chmod +x verify.sh
+./verify.sh
+
+# 2. Run full setup (installs deps, prepares data)
 chmod +x train.sh
 ./train.sh
+
+# 3. Start training
+cd ~/audio8/Audio8_TTS
+source ~/audio8/audio8-creole/french-model/.venv/bin/activate
+TRAIN_JSONL=../audio8-creole/french-model/prepared_data/train.jsonl \
+  NPROC_PER_NODE=1 \
+  bash audio8_tts_sft.sh
 ```
 
 ## Dataset Format
 
-The script expects this structure:
+The dataset should have:
+- `wavs/` folder with `.wav` files
+- `metadata.csv` with transcript mapping
 
+**metadata.csv format** (use `|` as separator):
 ```
-/path/to/creole/dataset/
-├── audio/          # .wav files (44.1kHz recommended)
-│   ├── sample_001.wav
-│   ├── sample_002.wav
-│   └── ...
-└── metadata.csv    # Columns: filename, text
-    filename,text
-    sample_001.wav,Bonjou kijan ou ye?
-    sample_002.wav,Mwen renmen Kreyòl Ayisyen.
+filename|text
+sample_001.wav|Bonjou kijan ou ye?
+sample_002.wav|Mwen renmen Kreyol Ayisyen.
 ```
-
-Adjust the manifest generation in `train.sh` if your format differs.
 
 ## Training Parameters
 
@@ -43,18 +67,18 @@ LEARNING_RATE=1e-5 \
 
 ## Output
 
-- Checkpoints: `outputs/`
-- Logs: `logs/`
-- Prepared data: `prepared_data/`
+- Checkpoints: `french-model/outputs/`
+- Logs: `french-model/logs/`
+- Prepared data: `french-model/prepared_data/`
 
 ## Test Fine-tuned Model
 
 ```bash
-cd ..
+cd ~/audio8/Audio8_TTS
 python audio8_tts_infer.py \
   --text "Bonjou, sa se yon tès." \
   --reference-audio examples/reference.wav \
   --reference-text "Reference transcript" \
-  --output outputs/test.wav \
-  --model outputs/
+  --output ../audio8-creole/french-model/outputs/test.wav \
+  --model ../audio8-creole/french-model/outputs/
 ```

@@ -2,10 +2,9 @@
 set -e
 
 # ============================================================
-# Audio8 TTS - Verification Script
+# Audio8 TTS - Setup Verification
 # ============================================================
-# Run this to verify the setup is working correctly.
-# Does NOT start training.
+# Run this to verify everything is ready for training.
 # ============================================================
 
 RED='\033[0;31m'
@@ -20,10 +19,12 @@ log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-MODEL_DIR="${REPO_ROOT}/model/audio8_tts_0_6B_preview"
+CREOLE_DIR="$(dirname "$SCRIPT_DIR")"
+AUDIO8_HOME="$(dirname "$CREOLE_DIR")"
+REPO_ROOT="${AUDIO8_HOME}/Audio8_TTS"
 DATA_DIR="${SCRIPT_DIR}/data"
 PREPARED_DIR="${SCRIPT_DIR}/prepared_data"
+DATASET_PATH="${AUDIO8_HOME}/kreol/data/worldspeech_mfe_ljspeech/wavs"
 
 echo ""
 echo "============================================"
@@ -31,76 +32,127 @@ echo " Audio8 TTS - Setup Verification"
 echo "============================================"
 echo ""
 
-# --- Check 1: Python and packages ---
-log_info "Check 1: Python environment..."
-python3 --version
-python3 -c "import torch; print(f'  PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')" || log_warn "PyTorch issue"
-python3 -c "import transformers; print(f'  Transformers {transformers.__version__}')" || log_warn "Transformers issue"
-python3 -c "import cv2; print(f'  OpenCV {cv2.__version__}')" || log_warn "OpenCV not installed"
+PASS=0
+FAIL=0
+
+# --- 1. Python & Packages ---
+log_info "1. Python environment"
+python3 --version 2>/dev/null && PASS=$((PASS+1)) || { log_error "Python3 not found"; FAIL=$((FAIL+1)); }
+
+python3 -c "import torch; print(f'   PyTorch {torch.__version__}')" 2>/dev/null && PASS=$((PASS+1)) || { log_warn "PyTorch not installed"; FAIL=$((FAIL+1)); }
+python3 -c "import torch; print(f'   CUDA: {torch.cuda.is_available()}, GPUs: {torch.cuda.device_count()}')" 2>/dev/null
+python3 -c "import transformers; print(f'   Transformers {transformers.__version__}')" 2>/dev/null && PASS=$((PASS+1)) || { log_warn "Transformers not installed"; FAIL=$((FAIL+1)); }
 echo ""
 
-# --- Check 2: GPU ---
-log_info "Check 2: GPU status..."
-nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader 2>/dev/null || log_warn "nvidia-smi not available"
+# --- 2. GPU ---
+log_info "2. GPU"
+nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader 2>/dev/null && PASS=$((PASS+1)) || { log_error "nvidia-smi not available"; FAIL=$((FAIL+1)); }
 echo ""
 
-# --- Check 3: Model checkpoint ---
-log_info "Check 3: Model checkpoint..."
-if [ -d "${MODEL_DIR}" ]; then
-    log_ok "Model found at ${MODEL_DIR}"
-    ls -la "${MODEL_DIR}" | head -10
-else
-    log_error "Model NOT found at ${MODEL_DIR}"
+# --- 3. Audio8 TTS repo ---
+log_info "3. Audio8 TTS repository"
+for f in audio8_tts_infer.py audio8_tts_prepare.py audio8_tts_sft.sh requirements-train.txt; do
+    if [ -f "${REPO_ROOT}/${f}" ]; then
+        log_ok "${f}"
+        PASS=$((PASS+1))
+    else
+        log_error "${f} NOT FOUND in ${REPO_ROOT}"
+        FAIL=$((FAIL+1))
+    fi
+done
+echo ""
+
+# --- 4. Model checkpoint ---
+log_info "4. Model checkpoint"
+MODEL_FOUND=false
+for path in \
+    "${REPO_ROOT}/model/audio8_tts_0_6B_preview" \
+    "${REPO_ROOT}/model/Audio8-TTS-Preview-0.6b" \
+    "${REPO_ROOT}/model"; do
+    if [ -d "$path" ]; then
+        log_ok "Model found: $path"
+        ls "$path" | head -5 | sed 's/^/   /'
+        MODEL_FOUND=true
+        PASS=$((PASS+1))
+        break
+    fi
+done
+if [ "$MODEL_FOUND" = false ]; then
+    log_error "Model NOT found in ${REPO_ROOT}/model/"
+    log_info "Download with:"
+    log_info "  cd ${REPO_ROOT} && mkdir -p model"
+    log_info "  huggingface-cli download Audio8/Audio8-TTS-Preview-0.6b --local-dir model/audio8_tts_0_6B_preview"
+    FAIL=$((FAIL+1))
 fi
 echo ""
 
-# --- Check 4: Dataset ---
-log_info "Check 4: Dataset..."
-DATASET_PATH="/home/ubuntu/audio8/kreol/data/worldspeech_mfe_ljspeech/wavs"
+# --- 5. Dataset ---
+log_info "5. Dataset"
 if [ -d "${DATASET_PATH}" ]; then
     WAV_COUNT=$(find "${DATASET_PATH}" -name "*.wav" -type f | wc -l)
     log_ok "Dataset found: ${WAV_COUNT} wav files"
+    PASS=$((PASS+1))
+
     log_info "Sample files:"
-    ls "${DATASET_PATH}" | head -5
+    find "${DATASET_PATH}" -name "*.wav" -type f | head -5 | sed 's/^/   /'
 else
     log_error "Dataset NOT found at ${DATASET_PATH}"
+    FAIL=$((FAIL+1))
 fi
 echo ""
 
-# --- Check 5: Generated data ---
-log_info "Check 5: Generated data files..."
+# --- 6. Metadata ---
+log_info "6. Metadata/Transcripts"
+KREOL_DIR="${AUDIO8_HOME}/kreol"
+FOUND_META=false
+for meta in "metadata.csv" "metadata.txt" "transcripts.csv" "text.csv"; do
+    for dir in "${KREOL_DIR}" "${KREOL_DIR}/data" "${DATASET_PATH}"; do
+        if [ -f "${dir}/${meta}" ]; then
+            log_ok "Found: ${dir}/${meta}"
+            head -3 "${dir}/${meta}" | sed 's/^/   /'
+            FOUND_META=true
+            PASS=$((PASS+1))
+            break 2
+        fi
+    done
+done
+if [ "$FOUND_META" = false ]; then
+    log_warn "No metadata file found"
+    log_info "You'll need to create metadata.csv with: filename|text"
+    FAIL=$((FAIL+1))
+fi
+echo ""
+
+# --- 7. Generated data ---
+log_info "7. Generated training data"
 if [ -f "${DATA_DIR}/train.jsonl" ]; then
     COUNT=$(wc -l < "${DATA_DIR}/train.jsonl")
     log_ok "Raw manifest: ${COUNT} entries"
+    PASS=$((PASS+1))
 else
-    log_warn "Raw manifest not generated yet (run train.sh)"
+    log_warn "Raw manifest not generated yet (run ./train.sh)"
 fi
 
 if [ -f "${PREPARED_DIR}/train.jsonl" ]; then
     COUNT=$(wc -l < "${PREPARED_DIR}/train.jsonl")
     log_ok "Prepared manifest: ${COUNT} entries"
+    PASS=$((PASS+1))
 else
-    log_warn "Prepared manifest not generated yet (run train.sh)"
+    log_warn "Prepared manifest not generated yet (run ./train.sh)"
 fi
 echo ""
 
-# --- Check 6: Repository scripts ---
-log_info "Check 6: Required scripts..."
-for script in "audio8_tts_infer.py" "audio8_tts_prepare.py" "audio8_tts_sft.sh"; do
-    if [ -f "${REPO_ROOT}/${script}" ]; then
-        log_ok "${script}"
-    else
-        log_error "${script} NOT FOUND"
-    fi
-done
-echo ""
-
 # --- Summary ---
+TOTAL=$((PASS + FAIL))
 echo "============================================"
-log_ok "Verification complete!"
+if [ "${FAIL}" -eq 0 ]; then
+    log_ok "All ${TOTAL} checks passed! Ready for training."
+else
+    log_warn "${PASS}/${TOTAL} checks passed, ${FAIL} need attention"
+fi
+echo "============================================"
 echo ""
 echo "Next steps:"
-echo "  1. Run setup:     ./train.sh"
-echo "  2. Start training: cd ${REPO_ROOT} && bash audio8_tts_sft.sh"
-echo "============================================"
+echo "  1. Run setup:  ./train.sh"
+echo "  2. Then train: cd ${REPO_ROOT} && bash audio8_tts_sft.sh"
 echo ""

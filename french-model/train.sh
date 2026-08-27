@@ -4,8 +4,14 @@ set -e
 # ============================================================
 # Audio8 TTS - French Creole Fine-tuning Setup
 # ============================================================
-# This script sets up everything for training.
-# Training is NOT started automatically.
+# Project structure on GPU host:
+#   ~/audio8/
+#   ├── Audio8_TTS/       <- Original model repo (code + model)
+#   ├── audio8-creole/    <- This repo (training scripts)
+#   └── kreol/            <- Dataset
+#       └── data/
+#           └── worldspeech_mfe_ljspeech/
+#               └── wavs/ <- .wav files
 # ============================================================
 
 # --- Colors for output ---
@@ -22,17 +28,30 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # --- Configuration ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-MODEL_DIR="${REPO_ROOT}/model/audio8_tts_0_6B_preview"
+CREOLE_DIR="$(dirname "$SCRIPT_DIR")"
+AUDIO8_HOME="$(dirname "$CREOLE_DIR")"
+REPO_ROOT="${AUDIO8_HOME}/Audio8_TTS"
 DATA_DIR="${SCRIPT_DIR}/data"
 PREPARED_DIR="${SCRIPT_DIR}/prepared_data"
 OUTPUT_DIR="${SCRIPT_DIR}/outputs"
 LOG_DIR="${SCRIPT_DIR}/logs"
 
-# Dataset
-DATASET_PATH="/home/ubuntu/audio8/kreol/data/worldspeech_mfe_ljspeech/wavs"
+# Dataset path
+DATASET_PATH="${AUDIO8_HOME}/kreol/data/worldspeech_mfe_ljspeech/wavs"
 
-# Training hyperparameters (can be overridden via env vars)
+# Model path - check common locations
+MODEL_DIR=""
+for path in \
+    "${REPO_ROOT}/model/audio8_tts_0_6B_preview" \
+    "${REPO_ROOT}/model/Audio8-TTS-Preview-0.6b" \
+    "${REPO_ROOT}/model"; do
+    if [ -d "$path" ]; then
+        MODEL_DIR="$path"
+        break
+    fi
+done
+
+# Training hyperparameters
 NPROC_PER_NODE=${NPROC_PER_NODE:-1}
 BATCH_SIZE=${BATCH_SIZE:-2}
 GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-8}
@@ -45,10 +64,9 @@ echo ""
 echo "============================================"
 echo " Audio8 TTS - French Creole Fine-tuning"
 echo "============================================"
-echo " Script dir:    ${SCRIPT_DIR}"
-echo " Repo root:     ${REPO_ROOT}"
-echo " Model dir:     ${MODEL_DIR}"
-echo " Dataset path:  ${DATASET_PATH}"
+echo " Creole dir:    ${CREOLE_DIR}"
+echo " Audio8 repo:   ${REPO_ROOT}"
+echo " Dataset:       ${DATASET_PATH}"
 echo " Output dir:    ${OUTPUT_DIR}"
 echo "============================================"
 echo ""
@@ -58,10 +76,15 @@ echo ""
 # ============================================================
 log_info "Step 1/7: Verifying directory structure..."
 
-# Check if we are in the right repo
+if [ ! -d "${AUDIO8_HOME}" ]; then
+    log_error "Audio8 home not found: ${AUDIO8_HOME}"
+    exit 1
+fi
+log_ok "Audio8 home: ${AUDIO8_HOME}"
+
 if [ ! -f "${REPO_ROOT}/audio8_tts_infer.py" ]; then
     log_error "Cannot find audio8_tts_infer.py in ${REPO_ROOT}"
-    log_error "Make sure you cloned the Audio8 TTS repo correctly."
+    log_error "Audio8_TTS repo not cloned correctly."
     exit 1
 fi
 log_ok "Found audio8_tts_infer.py"
@@ -79,22 +102,22 @@ fi
 log_ok "Found audio8_tts_prepare.py"
 
 # Check model checkpoint
-if [ ! -d "${MODEL_DIR}" ]; then
-    log_warn "Model checkpoint not found at ${MODEL_DIR}"
-    log_warn "Checking alternative locations..."
+if [ -z "${MODEL_DIR}" ] || [ ! -d "${MODEL_DIR}" ]; then
+    log_warn "Model checkpoint not found in standard locations"
+    log_info "Checking ${REPO_ROOT}/model/..."
     if [ -d "${REPO_ROOT}/model" ]; then
-        log_info "Contents of ${REPO_ROOT}/model/:"
         ls -la "${REPO_ROOT}/model/"
     fi
-    log_error "Download the model from:"
-    log_error "  huggingface-cli download Audio8/Audio8-TTS-Preview-0.6b --local-dir ${MODEL_DIR}"
+    echo ""
+    log_error "Download the model:"
+    log_error "  cd ${REPO_ROOT}"
+    log_error "  mkdir -p model"
+    log_error "  huggingface-cli download Audio8/Audio8-TTS-Preview-0.6b --local-dir model/audio8_tts_0_6B_preview"
     exit 1
 fi
-log_ok "Model checkpoint found at ${MODEL_DIR}"
-
-# List model contents
+log_ok "Model found: ${MODEL_DIR}"
 log_info "Model contents:"
-ls -la "${MODEL_DIR}" | head -20
+ls "${MODEL_DIR}" | head -10
 echo ""
 
 # ============================================================
@@ -103,106 +126,106 @@ echo ""
 log_info "Step 2/7: Verifying dataset..."
 
 if [ ! -d "${DATASET_PATH}" ]; then
-    log_error "Dataset directory not found: ${DATASET_PATH}"
+    log_error "Dataset not found: ${DATASET_PATH}"
+    log_info "Checking kreol directory..."
+    if [ -d "${AUDIO8_HOME}/kreol" ]; then
+        find "${AUDIO8_HOME}/kreol" -type d | head -20
+    fi
     exit 1
 fi
 log_ok "Dataset directory exists"
 
-# Count wav files
 WAV_COUNT=$(find "${DATASET_PATH}" -name "*.wav" -type f | wc -l)
-log_info "Found ${WAV_COUNT} .wav files in ${DATASET_PATH}"
+log_info "Found ${WAV_COUNT} .wav files"
 
 if [ "${WAV_COUNT}" -eq 0 ]; then
-    log_error "No .wav files found in ${DATASET_PATH}"
+    log_error "No .wav files in ${DATASET_PATH}"
     exit 1
 fi
 log_ok "Dataset has ${WAV_COUNT} audio files"
 
-# Show first few files
-log_info "First 10 .wav files:"
-find "${DATASET_PATH}" -name "*.wav" -type f | head -10 | while read f; do
-    echo "  $(basename "$f")"
+# Show sample files
+log_info "Sample files:"
+find "${DATASET_PATH}" -name "*.wav" -type f | head -5 | while read f; do
+    SIZE=$(stat -c%s "$f" 2>/dev/null || echo "?")
+    echo "  $(basename "$f") (${SIZE} bytes)"
 done
 echo ""
 
-# Check for metadata files
-log_info "Looking for metadata files..."
-DATASET_PARENT="$(dirname "${DATASET_PATH}")"
-for meta_name in "metadata.csv" "metadata.txt" "metadata.json" "transcripts.csv" "text.csv" "text.txt"; do
-    if [ -f "${DATASET_PARENT}/${meta_name}" ]; then
-        log_ok "Found: ${DATASET_PARENT}/${meta_name}"
-        log_info "First 5 lines:"
-        head -5 "${DATASET_PARENT}/${meta_name}"
-        echo ""
-    fi
-    if [ -f "${DATASET_PATH}/${meta_name}" ]; then
-        log_ok "Found: ${DATASET_PATH}/${meta_name}"
-        log_info "First 5 lines:"
-        head -5 "${DATASET_PATH}/${meta_name}"
-        echo ""
-    fi
+# Check for metadata
+log_info "Looking for transcript files..."
+KREOL_DIR="${AUDIO8_HOME}/kreol"
+for meta in "metadata.csv" "metadata.txt" "transcripts.csv" "text.csv"; do
+    for dir in "${KREOL_DIR}" "${KREOL_DIR}/data" "${DATASET_PATH}"; do
+        if [ -f "${dir}/${meta}" ]; then
+            log_ok "Found: ${dir}/${meta}"
+            log_info "First 3 lines:"
+            head -3 "${dir}/${meta}"
+            echo ""
+        fi
+    done
 done
 
-# Check for text files that might contain transcripts
-if [ -f "${DATASET_PARENT}/metadata.csv" ]; then
-    log_ok "Using metadata.csv for transcript mapping"
-    METADATA_FILE="${DATASET_PARENT}/metadata.csv"
-elif [ -f "${DATASET_PATH}/metadata.csv" ]; then
-    log_ok "Using metadata.csv for transcript mapping"
-    METADATA_FILE="${DATASET_PATH}/metadata.csv"
-else
-    log_warn "No metadata.csv found!"
-    log_warn "Will generate manifest using filenames as IDs"
-    log_warn "You will need to add text transcripts manually"
-    METADATA_FILE=""
+# List all files in kreol directory
+log_info "Kreol directory structure:"
+find "${KREOL_DIR}" -maxdepth 3 -type f | head -20
+echo ""
+
+# ============================================================
+# STEP 3: Activate venv and install dependencies
+# ============================================================
+log_info "Step 3/7: Setting up Python environment..."
+
+# Check if venv exists, create if not
+VENV_DIR="${SCRIPT_DIR}/.venv"
+if [ ! -d "${VENV_DIR}" ]; then
+    log_info "Creating virtual environment..."
+    python3 -m venv "${VENV_DIR}"
+    log_ok "Created venv at ${VENV_DIR}"
 fi
 
-# ============================================================
-# STEP 3: Install training dependencies
-# ============================================================
-log_info "Step 3/7: Installing training dependencies..."
+log_info "Activating venv..."
+source "${VENV_DIR}/bin/activate"
+log_ok "Activated: $(which python3)"
+log_ok "Python: $(python3 --version)"
 
-cd "${REPO_ROOT}"
+# Install dependencies
+log_info "Installing training dependencies..."
+pip install --upgrade pip -q
 
 if [ -f "${REPO_ROOT}/requirements-train.txt" ]; then
     log_info "Installing from requirements-train.txt..."
-    pip install -r requirements-train.txt 2>&1 | tail -5
+    pip install -r "${REPO_ROOT}/requirements-train.txt" -q
     log_ok "Training dependencies installed"
 else
-    log_warn "requirements-train.txt not found, installing common training deps..."
-    pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
-    pip install transformers datasets accelerate
-    log_ok "Common training dependencies installed"
+    log_warn "requirements-train.txt not found, installing manually..."
+    pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121 -q
+    pip install transformers datasets accelerate -q
+    log_ok "Dependencies installed"
 fi
 
-# Verify key packages
-log_info "Verifying key packages..."
-python3 -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'GPU count: {torch.cuda.device_count()}')" 2>/dev/null || {
-    log_error "PyTorch not installed or CUDA not available"
-    exit 1
-}
-python3 -c "import transformers; print(f'Transformers: {transformers.__version__}')" 2>/dev/null || {
-    log_error "Transformers not installed"
-    exit 1
-}
-log_ok "All key packages verified"
+# Verify packages
+log_info "Verifying packages..."
+python3 -c "
+import torch
+print(f'  PyTorch: {torch.__version__}')
+print(f'  CUDA available: {torch.cuda.is_available()}')
+if torch.cuda.is_available():
+    print(f'  GPU: {torch.cuda.get_device_name(0)}')
+    print(f'  GPU memory: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB')
+"
+python3 -c "import transformers; print(f'  Transformers: {transformers.__version__}')"
+python3 -c "import cv2; print(f'  OpenCV: {cv2.__version__}')" 2>/dev/null || log_warn "OpenCV not installed (not critical for training)"
+log_ok "Environment ready"
 echo ""
 
 # ============================================================
-# STEP 4: Create data directories
+# STEP 4: Create directories
 # ============================================================
-log_info "Step 4/7: Creating data directories..."
+log_info "Step 4/7: Creating directories..."
 
-mkdir -p "${DATA_DIR}"
-mkdir -p "${PREPARED_DIR}"
-mkdir -p "${OUTPUT_DIR}"
-mkdir -p "${LOG_DIR}"
-
-log_ok "Created: ${DATA_DIR}"
-log_ok "Created: ${PREPARED_DIR}"
-log_ok "Created: ${OUTPUT_DIR}"
-log_ok "Created: ${LOG_DIR}"
-echo ""
+mkdir -p "${DATA_DIR}" "${PREPARED_DIR}" "${OUTPUT_DIR}" "${LOG_DIR}"
+log_ok "Created data directories"
 
 # ============================================================
 # STEP 5: Generate manifest JSONL
@@ -211,44 +234,55 @@ log_info "Step 5/7: Generating training manifest..."
 
 MANIFEST_FILE="${DATA_DIR}/train.jsonl"
 
-python3 << 'PYTHON_SCRIPT'
+python3 << PYTHON_SCRIPT
 import os
 import json
 import sys
 
-dataset_path = os.environ.get("DATASET_PATH", "/home/ubuntu/audio8/kreol/data/worldspeech_mfe_ljspeech/wavs")
-data_dir = os.environ.get("DATA_DIR", "data")
+dataset_path = "${DATASET_PATH}"
+data_dir = "${DATA_DIR}"
 output_file = os.path.join(data_dir, "train.jsonl")
 
-# Collect all wav files
+# Collect wav files
 wav_files = sorted([f for f in os.listdir(dataset_path) if f.endswith(".wav")])
-
-if not wav_files:
-    print(f"ERROR: No .wav files found in {dataset_path}")
-    sys.exit(1)
-
 print(f"Found {len(wav_files)} .wav files")
 
-# Check for metadata.csv in parent directory
-dataset_parent = os.path.dirname(dataset_path)
-metadata_file = os.path.join(dataset_parent, "metadata.csv")
-
+# Look for metadata
+kreol_dir = "${AUDIO8_HOME}/kreol"
 metadata = {}
-if os.path.exists(metadata_file):
-    print(f"Loading metadata from {metadata_file}")
-    with open(metadata_file, "r", encoding="utf-8") as f:
-        for line in f:
-            parts = line.strip().split("|")  # LJSpeech format uses |
-            if len(parts) < 2:
-                parts = line.strip().split(",")  # Try CSV format
-            if len(parts) >= 2:
-                filename = parts[0].strip()
-                text = parts[1].strip()
-                metadata[filename] = text
-    print(f"Loaded {len(metadata)} entries from metadata")
-else:
-    print(f"WARNING: No metadata.csv found at {metadata_parent}")
-    print("Will create manifest with empty text - you MUST add transcripts")
+metadata_found = False
+
+for root, dirs, files in os.walk(kreol_dir):
+    for fname in files:
+        if fname in ["metadata.csv", "metadata.txt", "transcripts.csv"]:
+            mpath = os.path.join(root, fname)
+            print(f"Loading metadata from: {mpath}")
+            with open(mpath, "r", encoding="utf-8") as f:
+                for line in f:
+                    # Try different separators
+                    for sep in ["|", ",", "\t"]:
+                        parts = line.strip().split(sep)
+                        if len(parts) >= 2:
+                            filename = parts[0].strip()
+                            text = sep.join(parts[1:]).strip()
+                            # Remove .wav extension if present
+                            key = os.path.splitext(filename)[0]
+                            metadata[key] = text
+                            metadata[filename] = text
+                            break
+            metadata_found = True
+            print(f"Loaded {len(metadata)} entries")
+            break
+    if metadata_found:
+        break
+
+if not metadata_found:
+    print("WARNING: No metadata file found!")
+    print("Please create metadata.csv with format: filename|text")
+    print("Example:")
+    print("  sample_001.wav|Bonjou kijan ou ye?")
+    print("  sample_002.wav|Mwen renmen Kreyol Ayisyen.")
+    sys.exit(1)
 
 # Generate manifest
 records = []
@@ -257,45 +291,33 @@ for wav_file in wav_files:
     wav_path = os.path.abspath(os.path.join(dataset_path, wav_file))
     file_id = os.path.splitext(wav_file)[0]
 
-    # Get text from metadata if available
-    text = metadata.get(wav_file, "")
-    if not text:
-        text = metadata.get(file_id, "")
-
+    text = metadata.get(wav_file, metadata.get(file_id, ""))
     if not text:
         skipped += 1
-        if skipped <= 5:
+        if skipped <= 3:
             print(f"WARNING: No transcript for {wav_file}")
         continue
 
-    record = {
+    records.append({
         "id": f"creole_{file_id}",
         "text": text,
         "audio": wav_path
-    }
-    records.append(record)
+    })
 
-if skipped > 0:
-    print(f"\nWARNING: {skipped} files have no transcript")
-    if skipped == len(wav_files):
-        print("ERROR: No transcripts found. Please provide metadata.csv")
-        sys.exit(1)
-
-# Write manifest
 with open(output_file, "w", encoding="utf-8") as f:
     for rec in records:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 print(f"\nManifest created: {output_file}")
 print(f"Total entries: {len(records)}")
+if skipped:
+    print(f"Skipped (no transcript): {skipped}")
 PYTHON_SCRIPT
 
 if [ $? -eq 0 ]; then
-    log_ok "Manifest generated successfully"
+    log_ok "Manifest generated"
     log_info "Manifest stats:"
     wc -l "${MANIFEST_FILE}"
-    log_info "First 3 entries:"
-    head -3 "${MANIFEST_FILE}" | python3 -m json.tool 2>/dev/null || head -3 "${MANIFEST_FILE}"
 else
     log_error "Manifest generation failed"
     exit 1
@@ -306,86 +328,73 @@ echo ""
 # STEP 6: Precompute codec indices
 # ============================================================
 log_info "Step 6/7: Precomputing codec indices..."
-log_info "This will take a while depending on dataset size..."
+log_info "This processes audio files and may take a while..."
 
 cd "${REPO_ROOT}"
-
-python audio8_tts_prepare.py \
+python3 audio8_tts_prepare.py \
     --input-jsonl "${DATA_DIR}/train.jsonl" \
     --output-jsonl "${PREPARED_DIR}/train.jsonl" \
     --batch-size 4 2>&1 | tee "${LOG_DIR}/prepare.log"
 
 if [ $? -eq 0 ]; then
-    log_ok "Codec indices precomputed successfully"
-    log_info "Prepared manifest stats:"
+    log_ok "Codec indices precomputed"
+    log_info "Prepared manifest:"
     wc -l "${PREPARED_DIR}/train.jsonl"
 else
-    log_error "Codec precomputation failed. Check ${LOG_DIR}/prepare.log"
+    log_error "Precomputation failed. Check ${LOG_DIR}/prepare.log"
     exit 1
 fi
 echo ""
 
 # ============================================================
-# STEP 7: Verify everything is ready
+# STEP 7: Final verification
 # ============================================================
 log_info "Step 7/7: Final verification..."
 
 echo ""
 echo "============================================"
-echo " SETUP COMPLETE - VERIFICATION SUMMARY"
+echo " SETUP COMPLETE"
 echo "============================================"
 
-# Check all required files
-REQUIRED_FILES=(
-    "${DATA_DIR}/train.jsonl"
-    "${PREPARED_DIR}/train.jsonl"
-)
+CHECKS_PASSED=0
+CHECKS_TOTAL=0
 
-ALL_OK=true
-for f in "${REQUIRED_FILES[@]}"; do
-    if [ -f "$f" ]; then
-        SIZE=$(stat -f%z "$f" 2>/dev/null || stat -c%s "$f" 2>/dev/null || echo "unknown")
-        log_ok "$(basename $f) exists (${SIZE} bytes)"
+check_item() {
+    CHECKS_TOTAL=$((CHECKS_TOTAL + 1))
+    if [ "$1" = "ok" ]; then
+        log_ok "$2"
+        CHECKS_PASSED=$((CHECKS_PASSED + 1))
     else
-        log_error "$(basename $f) MISSING"
-        ALL_OK=false
+        log_error "$2"
     fi
-done
-
-# Check model
-if [ -d "${MODEL_DIR}" ]; then
-    log_ok "Model checkpoint: ${MODEL_DIR}"
-else
-    log_error "Model checkpoint: MISSING"
-    ALL_OK=false
-fi
-
-# Check GPU
-log_info "GPU status:"
-nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader 2>/dev/null || {
-    log_warn "nvidia-smi not available"
 }
 
-echo ""
-echo "============================================"
-if [ "${ALL_OK}" = true ]; then
-    log_ok "All checks passed!"
-else
-    log_error "Some checks failed. Fix issues before training."
-fi
-echo "============================================"
-echo ""
+[ -f "${DATA_DIR}/train.jsonl" ] && check_item "ok" "Raw manifest" || check_item "fail" "Raw manifest MISSING"
+[ -f "${PREPARED_DIR}/train.jsonl" ] && check_item "ok" "Prepared manifest" || check_item "fail" "Prepared manifest MISSING"
+[ -d "${MODEL_DIR}" ] && check_item "ok" "Model checkpoint" || check_item "fail" "Model checkpoint MISSING"
 
-# Show training command (but don't run it)
-log_info "To start training, run:"
+# Check GPU
+if nvidia-smi --query-gpu=name,memory.free --format=csv,noheader 2>/dev/null | head -1 > /dev/null; then
+    check_item "ok" "GPU available"
+else
+    check_item "fail" "GPU not detected"
+fi
+
+echo ""
+echo "Checks passed: ${CHECKS_PASSED}/${CHECKS_TOTAL}"
+echo "============================================"
+
+# Print training command
+echo ""
+log_info "When ready to train, run:"
 echo ""
 echo "  cd ${REPO_ROOT}"
+echo "  source ${VENV_DIR}/bin/activate"
 echo "  TRAIN_JSONL=${PREPARED_DIR}/train.jsonl \\"
 echo "    NPROC_PER_NODE=${NPROC_PER_NODE} \\"
 echo "    BATCH_SIZE=${BATCH_SIZE} \\"
 echo "    GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS} \\"
 echo "    bash audio8_tts_sft.sh"
 echo ""
-log_info "Or run the full training script:"
-echo "  ./train.sh --start-training"
+log_info "Monitor GPU usage: watch -n 1 nvidia-smi"
 echo ""
